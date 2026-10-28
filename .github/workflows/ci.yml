@@ -1,0 +1,146 @@
+name: CI/CD Pipeline
+
+# Runs automatically on every push and pull request. The pipeline FAILS (red build)
+# when static analysis finds errors, any backend/frontend test fails, a build fails
+# or the Docker stack does not start healthy.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend - install, lint, test, build
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      MONGO_URI_TEST: mongodb://127.0.0.1:27017/hustlehub_test
+    defaults:
+      run:
+        working-directory: "hustlehub+part2 update/hustlehub-backend"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Static analysis (ESLint + security plugin) - fails on errors
+        run: npm run lint
+
+      - name: Static analysis report (evidence)
+        if: always()
+        run: |
+          npm run lint:report || true
+          cat reports/static-analysis-summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload static analysis evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-backend
+          path: "hustlehub+part2 update/hustlehub-backend/reports/"
+          if-no-files-found: warn
+
+      - name: Run backend tests (unit + API integration)
+        run: npm run test:ci
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: "hustlehub+part2 update/hustlehub-backend/coverage/"
+          if-no-files-found: ignore
+
+      - name: Build backend
+        run: npm run build
+
+      - name: Dependency vulnerability scan (informational)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+  frontend:
+    name: Frontend - install, lint, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "hustlehub+part2 update/hustlehub-frontend"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Static analysis (ESLint) - fails on errors
+        run: npm run lint
+
+      - name: Static analysis report (evidence)
+        if: always()
+        run: |
+          npm run lint:report || true
+          cat reports/static-analysis-summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload static analysis evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-frontend
+          path: "hustlehub+part2 update/hustlehub-frontend/reports/"
+          if-no-files-found: warn
+
+      - name: Run frontend tests
+        run: npm run test:ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Dependency vulnerability scan (informational)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+  docker:
+    name: Docker - build images and smoke-test the stack
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env for the stack
+        run: echo "JWT_SECRET=$(openssl rand -hex 32)" > .env
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Build and start the containerised stack
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Smoke test (client -> nginx -> API -> MongoDB)
+        run: |
+          docker compose ps
+          curl --fail --silent --show-error http://localhost:8080/api/health
+          curl --fail --silent --show-error --output /dev/null http://localhost:8080/
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
