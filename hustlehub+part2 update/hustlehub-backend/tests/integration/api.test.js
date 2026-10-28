@@ -13,7 +13,7 @@ jest.setTimeout(60000);
 
 const PASSWORD = 'Str0ng!Passw0rd';
 
-async function register(email, role) {
+function register(email, role) {
   return request(app).post('/api/auth/register').send({ email, password: PASSWORD, role });
 }
 
